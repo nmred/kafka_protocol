@@ -166,11 +166,11 @@ Response => CorrelationId ResponseMessage
 
 ##### 消息集合
 
-One structure common to both the produce and fetch requests is the message set format. A message in kafka is a key-value pair with a small amount of associated metadata. A message set is just a sequence of messages with offset and size information. This format happens to be used both for the on-disk storage on the broker and the on-the-wire format.
+消息集合格式是一个生产、消费请求的通用格式。在 Kafka 中一个消息由一个 key-value 键值对和一些关联的 meta 信息组成。一个消息集合是有多个消息体、消息的 offset 值以及消息大小组成的数组。该格式将被用在 broker 节点的磁盘存储和传输过程中。
 
-A message set is also the unit of compression in Kafka, and we allow messages to recursively contain compressed message sets to allow batch compression.
+在 kafka 中 一个消息集合也是一个压缩单元, 允许递归的包含已经压缩的消息体。
 
-N.B., MessageSets are not preceded by an int32 like other array elements in the protocol.
+注意：消息集合不能像协议中其他数组元素先于 int32 之前
 
 ```
 MessageSet => [Offset MessageSize Message]
@@ -201,18 +201,19 @@ Message => Crc MagicByte Attributes Key Value
 
 |字段 | 描述 |
 |-----|-----|
-| Offset | This is the offset used in kafka as the log sequence number. When the producer is sending non compressed messages, it can set the offsets to anything. When the producer is sending compressed messages, to avoid server side recompression, each compressed message should have offset starting from 0 and increasing by one for each inner message in the compressed message. (see more details about compressed messages in Kafka below) |
-| Crc | The CRC is the CRC32 of the remainder of the message bytes. This is used to check the integrity of the message on the broker and consumer. |
-| MagicByte | This is a version id used to allow backwards compatible evolution of the message binary format. The current value is 1. |
-| Attributes | This byte holds metadata attributes about the message. The lowest 3 bits contain the compression codec used for the message. The fourth lowest bit represents the timestamp type. 0 stands for CreateTime and 1 stands for LogAppendTime. The producer should always set this bit to 0. (since 0.10.0) All other bits should be set to 0. |
-| Timestamp | This is the timestamp of the message. The timestamp type is indicated in the attributes. Unit is milliseconds since beginning of the epoch (midnight Jan 1, 1970 (UTC)). |
-| Key | The key is an optional message key that was used for partition assignment. The key can be null. |
-| Value | The value is the actual message contents as an opaque byte array. Kafka supports recursive messages in which case this may itself contain a message set. The message can be null.|
+| Offset | offset 是 kafka 用来标识的序列号, 当生产者发送没有压缩的消息是，可以将设置为任何值。当生产者发送已经压缩的消息，为了避免服务端再次压缩，每个压缩的消息应该设置一个从 0 开始自增长的 offset。（详细参考下面介绍在kafka 压缩消息）|
+| Crc |CRC 是循环冗余码校验。用来校验在 broker 和消费者端的消息的完整性 |
+| MagicByte | 这个是版本 ID， 用来向后兼容演进消息二进制格式，当前值为 1 |
+| Attributes | 该 byte 位会存放一些消息的描述信息。低三位存放消息压缩类型 codec 值。第四位代表时间戳类型，0 代表消息创建时间，1 代表 消息 LogAppendTime 。对于生产者设置为 0 即可。（从 0.10.0 开始）所有的其他为都置为0 |
+| Timestamp | 消息的时间戳。依照属性中的时间类型。单位是毫秒从epoch 开始 （UTC）|
+| Key | 该值是可选项，其用来作为分区分配使用，可以为 null | 
+| Value | 实际的消息内容，由 byte 数组组成。Kafka 支持消息递归，即可能自身包含一个消息集合。消息可以为 null |
 
 ##### 压缩
 
-Kafka supports compressing messages for additional efficiency, however this is more complex than just compressing a raw message. Because individual messages may not have sufficient redundancy to enable good compression ratios, compressed messages must be sent in special batches (although you may use a batch of one if you truly wish to compress a message on its own). The messages to be sent are wrapped (uncompressed) in a MessageSet structure, which is then compressed and stored in the Value field of a single "Message" with the appropriate compression codec set. The receiving system parses the actual MessageSet from the decompressed value. The outer MessageSet should contain only one compressed "Message" (see KAFKA-1718 for details).
-Kafka currently supports two compression codecs with the following codec numbers:
+Kafka 支持压缩会有一些优化效果，但是也会比原始消息处理起来负责。因为单个消息可能不会有大的压缩比，压缩的消息必须在特定批量发送（尽管你可能一个批次发送一个消息如果认为压缩有效）。消息在发送的时候会被包装到 MessageSet 结构中，压缩后的消息将存储到单个 Message 结构中的 Value 字段中，并且设置 codec 字段。当接受到消息将被系统的解压缩 value 值。
+
+Kafka 当前支持两种压缩方式，codec 对应值如下：
 
 |压缩类型 | 编码 |
 |-----|-----|
@@ -222,17 +223,221 @@ Kafka currently supports two compression codecs with the following codec numbers
 
 #### API
 
-This section gives details on each of the individual APIs, their usage, their binary format, and the meaning of their fields.
+该节将详细的介绍每个 API 的用法、二进制格式以及字段的意义
 
 ##### Metadata API
 
 This API answers the following questions:
-What topics exist?
-How many partitions does each topic have?
-Which broker is currently the leader for each partition?
-What is the host and port for each of these brokers?
-This is the only request that can be addressed to any broker in the cluster.
-Since there may be many topics the client can give an optional list of topic names in order to only return metadata for a subset of topics.
-The metadata returned is at the partition level, but grouped together by topic for convenience and to avoid redundancy. For each partition the metadata contains the information for the leader as well as for all the replicas and the list of replicas that are currently in-sync.
-Note: If "auto.create.topics.enable" is set in the broker configuration, a topic metadata request will create the topic with the default replication factor and number of partitions. 
+该 API 将解答如下问题：
+
+- 当前集群存在那些 topic?
+- 每个 topic 有多少分区？
+- 每个分区当前对应的 leader 节点？
+- 每个 broker 对应的 IP 和端口？
+
+该接口可以请求集群中的任意一个节点。
+
+由于可能存在很多 topic, 所以可以选择仅仅返回一个 topic 名称列表以便返回 topic meta 信息
+
+Meta 信息返回时分区级别的，以 topic 为组的方式返回防止冗余。meta 信息中每个分区信息包含 leader 信息以及当前同步的复制节点信息列表。
+
+注意：如果 'auto.create.topics.enable' 在 broker 中配置，一个 topic meta 请求将创建一个 topic， 复制因子和分区数为默认的格式
+
+####### Topic Metadata Request
+
+```
+TopicMetadataRequest => [TopicName]
+	TopicName => string
+```
+
+|字段 | 描述 |
+|-----|-----|
+| TopicName |  要获取 meta 信息的 topic 名称，如果为空则表示获取所有 topic meta 信息 |
+
+###### Metadata Response
+
+```
+MetadataResponse => [Broker][TopicMetadata]
+  Broker => NodeId Host Port  (any number of brokers may be returned)
+    NodeId => int32
+    Host => string
+    Port => int32
+  TopicMetadata => TopicErrorCode TopicName [PartitionMetadata]
+    TopicErrorCode => int16
+  PartitionMetadata => PartitionErrorCode PartitionId Leader Replicas Isr
+    PartitionErrorCode => int16
+    PartitionId => int32
+    Leader => int32
+    Replicas => [int32]
+    Isr => [int32]
+```
+
+|字段 | 描述 |
+|-----|-----|
+| Leader |  对于该分区当前的 leader 节点 ID. 如果当前正在选举 leader 中，则返回 -1 |
+| Replicas | 该分区当前作为 leader 的 slaves 节点列表 | 
+| Isr | 复制节点列表的子集，leader 的备选节点列表 | 
+| Broker | kafka broker 节点的 node id, 主机名，端口等信息 |
+
+###### 可能返回的错误码
+
+- UnknownTopic (3)
+- LeaderNotAvailable (5)
+- InvalidTopic (17)
+- TopicAuthorizationFailed (29)
+
+##### Produce API
+
+生产 API 是用来将消息集合发送到服务端的。为了提升性能允许发送消息集合对于多个 topic 分区在一个单个请求。
+
+生产 API 使用通用的消息集合格式。但是由于没有 offset 被分配在生产者发送的时候，可以使用任何方式填充该值
+
+###### Produce Request
+
+```
+v0, v1 (supported in 0.9.0 or later) and v2 (supported in 0.10.0 or later)
+ProduceRequest => RequiredAcks Timeout [TopicName [Partition MessageSetSize MessageSet]]
+  RequiredAcks => int16
+  Timeout => int32
+  Partition => int32
+  MessageSetSize => int32
+```
+
+对于 v1 版或者更高版本的生产请求在请求响应中可以解析出来节流时间
+
+对于 v2 版或者更高版本的生产请求在请求响应中可以解析出来 timestamp 字段
+
+|字段 | 描述 |
+|-----|-----|
+| RequiredAcks | 该字段用来标识一个请求在响应前应该受到多少个节点确认。如果设置为0 服务端将不会发送任何响应。如果设置为 1， 服务端将等到数据已经写到本地的存储后发送响应。如果设置为 -1 服务端将阻塞等待，直到等所有同步复制节点都写入成功后才会响应 |
+| Timeout | 提供一个最大的等待响应的时间，这个 timeout 不能确切的限制请求的时间有如下几个原因：(1) 该超时时间不包括网络延迟时间。(2) 请求处理时才会开启定时器计数，也就是说如果在队列中的多数请求等待的时间是不包括的。(3) 本地写操作是不能中断的，也就是说本地写入时间超过该超时时间是不会起作用的。如果硬限制一个超时时间可以通过在客户端设置 socket 的 timeout 来控制 |
+| TopicName | 发送数据对应的 topic 名称 |
+| Partition | 发送数据对应的分区号 |
+| MessageSetSize | 发送消息集合的大小,即 MessageSet 结构的大小，后面紧随 MessageSet 数据 |
+| MessageSet | 一个消息集合，数据结构上面有描述 |
+
+###### Produce Response
+
+```
+v0
+ProduceResponse => [TopicName [Partition ErrorCode Offset]]
+  TopicName => string
+  Partition => int32
+  ErrorCode => int16
+  Offset => int64
+ 
+v1 (supported in 0.9.0 or later)
+ProduceResponse => [TopicName [Partition ErrorCode Offset]] ThrottleTime
+  TopicName => string
+  Partition => int32
+  ErrorCode => int16
+  Offset => int64
+  ThrottleTime => int32
+ 
+v2 (supported in 0.10.0 or later)
+ProduceResponse => [TopicName [Partition ErrorCode Offset Timestamp]] ThrottleTime
+  TopicName => string
+  Partition => int32
+  ErrorCode => int16
+  Offset => int64
+  Timestamp => int64
+  ThrottleTime => int32
+```
+
+|字段 | 描述 |
+|-----|-----|
+| Topic | 关联响应的 topic 名称 |
+| Partition | 关联响应的分区号 |
+| ErrorCode | 该分区的错误。错误是基于分区的，因为给定的分区可能是出于不可信或者其他节点维护状态，其他的请求可能可以成功接受 | 
+| Offset | 在该分区的一个消息集合中首条消息会追加 offset 值 |
+| Timestamp	 | 如果 topic 使用的是 LogAppendTime ，那么 timestamp 将会被 broker 分配设置到消息集合中。在消息集合中的消息 timestamp 都是一样的, 如果是 CreateTime ，该字段一直返回 -1 , 生产者可以假设 timestamp 是生产请求被接受的时间，如果没有错误返回的情况下. 单位是毫秒 | 
+| ThrottleTime | 在该段时间内请求将会被节流处理, 由于影响配额 (如果是 0 则表示请求将不受任何配额影响) | 
+
+
+###### 可能返回的错误码
+
+TODO
+
+##### Fetch API
+
+The fetch API is used to fetch a chunk of one or more logs for some topic-partitions. Logically one specifies the topics, partitions, and starting offset at which to begin the fetch and gets back a chunk of messages. In general, the return messages will have offsets larger than or equal to the starting offset. However, with compressed messages, it's possible for the returned messages to have offsets smaller than the starting offset. The number of such messages is typically small and the caller is responsible for filtering out those messages.
+Fetch requests follow a long poll model so they can be made to block for a period of time if sufficient data is not immediately available.
+As an optimization the server is allowed to return a partial message at the end of the message set. Clients should handle this case.
+One thing to note is that the fetch API requires specifying the partition to consume from. The question is how should a consumer know what partitions to consume from? In particular how can you balance the partitions over a set of consumers acting as a group so that each consumer gets a subset of partitions. We have done this assignment dynamically using zookeeper for the scala and java client. The downside of this approach is that it requires a fairly fat client and a zookeeper connection. We haven't yet created a Kafka API to allow this functionality to be moved to the server side and accessed more conveniently. A simple consumer client can be implemented by simply requiring that the partitions be specified in config, though this will not allow dynamic reassignment of partitions should that consumer fail. We hope to address this gap in the next major release.
+
+
+###### Fetch Request
+
+```
+FetchRequest => ReplicaId MaxWaitTime MinBytes [TopicName [Partition FetchOffset MaxBytes]]
+  ReplicaId => int32
+  MaxWaitTime => int32
+  MinBytes => int32
+  TopicName => string
+  Partition => int32
+  FetchOffset => int64
+  MaxBytes => int32
+```
+
+ReplicaId
+The replica id indicates the node id of the replica initiating this request. Normal client consumers should always specify this as -1 as they have no node id. Other brokers set this to be their own node id. The value -2 is accepted to allow a non-broker to issue fetch requests as if it were a replica broker for debugging purposes.
+MaxWaitTime
+The max wait time is the maximum amount of time in milliseconds to block waiting if insufficient data is available at the time the request is issued.
+MinBytes
+This is the minimum number of bytes of messages that must be available to give a response. If the client sets this to 0 the server will always respond immediately, however if there is no new data since their last request they will just get back empty message sets. If this is set to 1, the server will respond as soon as at least one partition has at least 1 byte of data or the specified timeout occurs. By setting higher values in combination with the timeout the consumer can tune for throughput and trade a little additional latency for reading only large chunks of data (e.g. setting MaxWaitTime to 100 ms and setting MinBytes to 64k would allow the server to wait up to 100ms to try to accumulate 64k of data before responding).
+TopicName
+The name of the topic.
+Partition
+The id of the partition the fetch is for.
+FetchOffset
+The offset to begin this fetch from.
+MaxBytes
+The maximum bytes to include in the message set for this partition. This helps bound the size of the response.
+
+###### Fetch Response
+
+```
+v0
+FetchResponse => [TopicName [Partition ErrorCode HighwaterMarkOffset MessageSetSize MessageSet]]
+  TopicName => string
+  Partition => int32
+  ErrorCode => int16
+  HighwaterMarkOffset => int64
+  MessageSetSize => int32
+ 
+v1 (supported in 0.9.0 or later) and v2 (supported in 0.10.0 or later)
+FetchResponse => ThrottleTime [TopicName [Partition ErrorCode HighwaterMarkOffset MessageSetSize MessageSet]]
+  ThrottleTime => int32
+  TopicName => string
+  Partition => int32
+  ErrorCode => int16
+  HighwaterMarkOffset => int64
+  MessageSetSize => int32
+```
+
+ThrottleTime	Duration in milliseconds for which the request was throttled due to quota violation. (Zero if the request did not violate any quota.)
+TopicName
+The name of the topic this response entry is for.
+Partition
+The id of the partition this response is for.
+HighwaterMarkOffset
+The offset at the end of the log for this partition. This can be used by the client to determine how many messages behind the end of the log they are.
+MessageSetSize
+The size in bytes of the message set for this partition
+MessageSet
+The message data fetched from this partition, in the format described above.
+
+
+Fetch Response v1 only contains message format v0.
+Fetch Response v2 might either contain message format v0 or message format v1.
+
+###### 可能返回的错误码
+
+* OFFSET_OUT_OF_RANGE (1)
+* UNKNOWN_TOPIC_OR_PARTITION (3)
+* NOT_LEADER_FOR_PARTITION (6)
+* REPLICA_NOT_AVAILABLE (9)
+* UNKNOWN (-1)
+
+
 
